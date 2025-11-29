@@ -24,56 +24,86 @@ const SvgCanvas = forwardRef(function SvgCanvas({ svgs }: Props, ref) {
   const [parts, setParts] = useState<SvgPart[]>([]);
   const [selectedId, setSelectedId] = useState<string | null>(null);
   const svgRef = useRef<SVGSVGElement>(null);
+  const bboxRefs = useRef<Record<string, SVGGElement | null>>({});
 
-  // inject SVGs
+  // Track previous count so svg injection doesn't duplicate
+  const prevCount = useRef(0);
+
+  /** Center helpers */
+  const getBBoxCenter = (p: SvgPart) => {
+    return {
+      cx: p.bbox.x + p.bbox.width / 2,
+      cy: p.bbox.y + p.bbox.height / 2,
+    };
+  };
+
+  /** Apply transforms around center */
+  const getTransform = (p: SvgPart) => {
+    const { cx, cy } = getBBoxCenter(p);
+    return `
+      translate(${p.x}, ${p.y})
+      translate(${cx}, ${cy})
+      rotate(${p.rotation})
+      scale(${p.scale})
+      translate(${-cx}, ${-cy})
+    `;
+  };
+
+  /** 1. Inject NEW svgs only */
   useEffect(() => {
-    if (!svgs.length) return;
-    const newParts = svgs.map((svg, i) => ({
+    if (svgs.length <= prevCount.current) return;
+
+    const newOnes = svgs.slice(prevCount.current);
+    prevCount.current = svgs.length;
+
+    const newParts = newOnes.map((svg, i) => ({
       id: `p-${Date.now()}-${i}`,
       svg,
-      x: 200 + i * 50,
+      x: 200 + parts.length * 50,
       y: 250,
       rotation: 0,
       scale: 1,
       bbox: { x: 0, y: 0, width: 100, height: 100 },
     }));
-    setParts(prev => [...prev, ...newParts]);
+
+    setParts((prev) => [...prev, ...newParts]);
   }, [svgs]);
 
-  // expose parts for keyframe editor
+  /** Expose parts to parent */
   useImperativeHandle(ref, () => ({
     getParts: () => parts,
     setParts: (p: SvgPart[]) => setParts(p),
   }));
 
-  // measure bounding boxes from DOM
-  const bboxRefs = useRef<Record<string, SVGGElement | null>>({});
-
+  /** 2. Measure bounding boxes only when new parts are added */
   useEffect(() => {
     parts.forEach((p) => {
-      const node = bboxRefs.current[p.id];
-      if (!node) return;
-
-      const bb = node.getBBox();
-      setParts(prev =>
-        prev.map(pp =>
-          pp.id === p.id ? { ...pp, bbox: bb } : pp
-        )
+      const el = bboxRefs.current[p.id];
+      if (!el) return;
+      const bb = el.getBBox();
+      setParts((prev) =>
+        prev.map((pp) => (pp.id === p.id ? { ...pp, bbox: bb } : pp))
       );
     });
   }, [parts.length]);
 
-  // drag logic
-  const dragRef = useRef<{ id: string; offsetX: number; offsetY: number } | null>(null);
+  // -----------------------------------------------------------------------------
+  // DRAG LOGIC
+  // -----------------------------------------------------------------------------
+
+  const dragRef = useRef<{ id: string; offsetX: number; offsetY: number } | null>(
+    null
+  );
 
   const onDownPart = (e: React.MouseEvent, id: string) => {
     e.stopPropagation();
     setSelectedId(id);
 
-    const part = parts.find(p => p.id === id)!;
+    const part = parts.find((p) => p.id === id)!;
 
     const pt = svgRef.current!.createSVGPoint();
-    pt.x = e.clientX; pt.y = e.clientY;
+    pt.x = e.clientX;
+    pt.y = e.clientY;
     const cursor = pt.matrixTransform(svgRef.current!.getScreenCTM()!.inverse());
 
     dragRef.current = {
@@ -87,13 +117,18 @@ const SvgCanvas = forwardRef(function SvgCanvas({ svgs }: Props, ref) {
     if (!dragRef.current) return;
 
     const pt = svgRef.current!.createSVGPoint();
-    pt.x = e.clientX; pt.y = e.clientY;
+    pt.x = e.clientX;
+    pt.y = e.clientY;
     const cursor = pt.matrixTransform(svgRef.current!.getScreenCTM()!.inverse());
 
-    setParts(prev =>
-      prev.map(p =>
+    setParts((prev) =>
+      prev.map((p) =>
         p.id === dragRef.current!.id
-          ? { ...p, x: cursor.x - dragRef.current!.offsetX, y: cursor.y - dragRef.current!.offsetY }
+          ? {
+              ...p,
+              x: cursor.x - dragRef.current!.offsetX,
+              y: cursor.y - dragRef.current!.offsetY,
+            }
           : p
       )
     );
@@ -103,21 +138,30 @@ const SvgCanvas = forwardRef(function SvgCanvas({ svgs }: Props, ref) {
     dragRef.current = null;
   };
 
-  // rotation
+  // -----------------------------------------------------------------------------
+  // ROTATION (around center)
+  // -----------------------------------------------------------------------------
+
   const onDownRotate = (e: React.MouseEvent, part: SvgPart) => {
     e.stopPropagation();
 
+    const { cx, cy } = getBBoxCenter(part);
+    const centerX = part.x + cx;
+    const centerY = part.y + cy;
+
     const move = (ev: MouseEvent) => {
       const pt = svgRef.current!.createSVGPoint();
-      pt.x = ev.clientX; pt.y = ev.clientY;
+      pt.x = ev.clientX;
+      pt.y = ev.clientY;
       const cur = pt.matrixTransform(svgRef.current!.getScreenCTM()!.inverse());
 
-      const dx = cur.x - part.x;
-      const dy = cur.y - part.y;
-      const angle = Math.atan2(dy, dx) * 180 / Math.PI;
+      const dx = cur.x - centerX;
+      const dy = cur.y - centerY;
 
-      setParts(prev =>
-        prev.map(p => p.id === part.id ? { ...p, rotation: angle } : p)
+      const angle = (Math.atan2(dy, dx) * 180) / Math.PI;
+
+      setParts((prev) =>
+        prev.map((p) => (p.id === part.id ? { ...p, rotation: angle } : p))
       );
     };
 
@@ -130,24 +174,33 @@ const SvgCanvas = forwardRef(function SvgCanvas({ svgs }: Props, ref) {
     window.addEventListener("mouseup", up);
   };
 
-  // resizing
-  const onDownResize = (e: React.MouseEvent, part: SvgPart, corner: string) => {
+  // -----------------------------------------------------------------------------
+  // RESIZE (scale around center)
+  // -----------------------------------------------------------------------------
+
+  const onDownResize = (e: React.MouseEvent, part: SvgPart) => {
     e.stopPropagation();
+
+    const { cx, cy } = getBBoxCenter(part);
+    const centerX = part.x + cx;
+    const centerY = part.y + cy;
+
+    const startDist = Math.hypot(
+      e.clientX - centerX,
+      e.clientY - centerY
+    );
 
     const startScale = part.scale;
 
     const move = (ev: MouseEvent) => {
-      const pt = svgRef.current!.createSVGPoint();
-      pt.x = ev.clientX; pt.y = ev.clientY;
-      const cur = pt.matrixTransform(svgRef.current!.getScreenCTM()!.inverse());
+      const dx = ev.clientX - centerX;
+      const dy = ev.clientY - centerY;
 
-      const dx = cur.x - part.x;
-      const dy = cur.y - part.y;
-      const dist = Math.sqrt(dx * dx + dy * dy);
+      const dist = Math.hypot(dx, dy);
+      const newScale = Math.max(0.05, (dist / startDist) * startScale);
 
-      const newScale = Math.max(0.05, dist / 100);
-      setParts(prev =>
-        prev.map(p => p.id === part.id ? { ...p, scale: newScale } : p)
+      setParts((prev) =>
+        prev.map((p) => (p.id === part.id ? { ...p, scale: newScale } : p))
       );
     };
 
@@ -159,6 +212,10 @@ const SvgCanvas = forwardRef(function SvgCanvas({ svgs }: Props, ref) {
     window.addEventListener("mousemove", move);
     window.addEventListener("mouseup", up);
   };
+
+  // -----------------------------------------------------------------------------
+  // RENDER
+  // -----------------------------------------------------------------------------
 
   return (
     <svg
@@ -167,36 +224,26 @@ const SvgCanvas = forwardRef(function SvgCanvas({ svgs }: Props, ref) {
       onMouseMove={onMove}
       onMouseUp={onUp}
     >
+      {/* Render SVG parts */}
       {parts.map((p) => (
         <g
           key={p.id}
           ref={(el) => (bboxRefs.current[p.id] = el)}
-          transform={`translate(${p.x}, ${p.y}) rotate(${p.rotation}) scale(${p.scale})`}
+          transform={getTransform(p)}
           dangerouslySetInnerHTML={{ __html: p.svg }}
           onMouseDown={(e) => onDownPart(e, p.id)}
         />
       ))}
 
-      {/* UI overlays */}
+      {/* UI overlays (selection box, resize, rotate) */}
       {parts.map((p) => {
         if (p.id !== selectedId) return null;
 
         const { x: bx, y: by, width, height } = p.bbox;
-
-        // corners relative to transform
-        const corners = [
-          { cx: bx, cy: by, name: "tl" },
-          { cx: bx + width, cy: by, name: "tr" },
-          { cx: bx, cy: by + height, name: "bl" },
-          { cx: bx + width, cy: by + height, name: "br" },
-        ];
+        const { cx, cy } = getBBoxCenter(p);
 
         return (
-          <g
-            key={p.id + "-ui"}
-            transform={`translate(${p.x}, ${p.y}) rotate(${p.rotation}) scale(${p.scale})`}
-          >
-            {/* bounding box */}
+          <g key={p.id + "-ui"} transform={getTransform(p)}>
             <rect
               x={bx}
               y={by}
@@ -209,7 +256,7 @@ const SvgCanvas = forwardRef(function SvgCanvas({ svgs }: Props, ref) {
 
             {/* rotation handle */}
             <circle
-              cx={bx + width / 2}
+              cx={cx}
               cy={by - 40}
               r={10 / p.scale}
               fill="white"
@@ -218,20 +265,17 @@ const SvgCanvas = forwardRef(function SvgCanvas({ svgs }: Props, ref) {
               onMouseDown={(e) => onDownRotate(e, p)}
             />
 
-            {/* resize handles */}
-            {corners.map(c => (
-              <rect
-                key={c.name}
-                x={c.cx - 6 / p.scale}
-                y={c.cy - 6 / p.scale}
-                width={12 / p.scale}
-                height={12 / p.scale}
-                fill="white"
-                stroke="#2979ff"
-                strokeWidth={1 / p.scale}
-                onMouseDown={(e) => onDownResize(e, p, c.name)}
-              />
-            ))}
+            {/* resize handle (bottom-right only for simplicity) */}
+            <rect
+              x={bx + width - 8 / p.scale}
+              y={by + height - 8 / p.scale}
+              width={16 / p.scale}
+              height={16 / p.scale}
+              fill="white"
+              stroke="#2979ff"
+              strokeWidth={1 / p.scale}
+              onMouseDown={(e) => onDownResize(e, p)}
+            />
           </g>
         );
       })}
